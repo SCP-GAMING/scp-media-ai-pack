@@ -122,8 +122,19 @@ import gc; gc.collect()
 import onnxruntime as ort
 from onnxruntime.quantization import quantize_dynamic, QuantType
 
+import onnx
 def quant(src, dst, ops):
-    quantize_dynamic(src, dst, weight_type=QuantType.QUInt8, per_channel=False, op_types_to_quantize=ops)
+    # Work with the weights in side files (the full UNet is over protobuf's 2 GB limit),
+    # then join them back into one file, which fits once shrunk to 8-bit.
+    work = os.path.join(TMP, "q_" + os.path.basename(dst).replace(".onnx", ""))
+    os.makedirs(work, exist_ok=True)
+    big = os.path.join(work, "model.onnx")
+    quantize_dynamic(src, big, weight_type=QuantType.QUInt8, per_channel=False, op_types_to_quantize=ops,
+                     use_external_data_format=True)
+    m = onnx.load(big, load_external_data=True)
+    onnx.save(m, dst, save_as_external_data=False)
+    del m
+    shutil.rmtree(work, ignore_errors=True)
     log("quantized", dst, os.path.getsize(dst) // 1_000_000, "MB")
 
 quant(f"{TMP}/te/text_encoder.onnx", f"{TMP}/text_encoder_q.onnx", ["MatMul", "Gemm"])
