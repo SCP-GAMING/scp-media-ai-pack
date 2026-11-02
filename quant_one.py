@@ -33,6 +33,18 @@ print("ops:", {k: v for k, v in ops_count.items() if k in ("Conv", "ConvInteger"
 print("weights MB by type:", {k: v // 1_000_000 for k, v in by_type.items()}, "constants MB:", const_bytes // 1_000_000, "unused initializers:", len(unused), flush=True)
 for t in unused:
     m.graph.initializer.remove(t)
+# Drop constants nothing uses any more (the full-size weights the 8-bit ones replaced), repeatedly.
+removed = 0
+while True:
+    used = {i for nd in m.graph.node for i in nd.input} | {o.name for o in m.graph.output}
+    dead = [nd for nd in m.graph.node if nd.op_type == "Constant" and all(o not in used for o in nd.output)]
+    if not dead:
+        break
+    for nd in dead:
+        m.graph.node.remove(nd)
+    removed += len(dead)
+left = sum(len(a.t.raw_data) + 4 * len(a.t.float_data) for nd in m.graph.node if nd.op_type == "Constant" for a in nd.attribute if a.type == onnx.AttributeProto.TENSOR)
+print("removed unused constants:", removed, "constants left MB:", left // 1_000_000, flush=True)
 for f in (dst, dst + ".data"):
     if os.path.exists(f): os.remove(f)
 try:
