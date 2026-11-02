@@ -142,7 +142,7 @@ def quant(src, dst, ops):
     os.makedirs(work, exist_ok=True)
     big = os.path.join(work, "model.onnx")
     quantize_dynamic(src, big, weight_type=QuantType.QUInt8, per_channel=False, op_types_to_quantize=ops,
-                     use_external_data_format=True)
+                     use_external_data_format=True, extra_options={"DefaultTensorType": onnx.TensorProto.FLOAT})
     m = onnx.load(big, load_external_data=True)
     onnx.save(m, dst, save_as_external_data=False)  # under 2 GB once shrunk
     del m
