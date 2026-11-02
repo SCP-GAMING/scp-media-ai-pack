@@ -115,7 +115,7 @@ tok = pipe.tokenizer
 tok.save_pretrained(f"{TMP}/tok")
 shutil.copy(f"{TMP}/tok/vocab.json", f"{OUT}/vocab.json")
 shutil.copy(f"{TMP}/tok/merges.txt", f"{OUT}/merges.txt")
-del pipe
+del pipe, te_model
 import gc; gc.collect()
 
 # ---------------------------------------------------------------- shrink to 8-bit
@@ -128,14 +128,10 @@ import onnxruntime.quantization.quant_utils as _qu
 import onnxruntime.quantization.onnx_quantizer as _oq
 
 def _save_and_reload_big(model):
-    # The quantizer re-saves the model in one piece, which fails over 2 GB. Save with side files instead.
-    with tempfile.TemporaryDirectory(dir=TMP) as d:
-        p = os.path.join(d, "model.onnx")
-        onnx.save_model(model, p, save_as_external_data=True, all_tensors_to_one_file=True, location="model.onnx.data", size_threshold=0, convert_attribute=True)
-        onnx.shape_inference.infer_shapes_path(p, p)
-        m = onnx.load(p, load_external_data=True)
-        _qu.add_infer_metadata(m)
-        return m
+    # The quantizer re-saves and reloads the whole model here (fails over 2 GB, and needs several
+    # copies in memory). Shapes aren't needed for weight-only shrinking, so keep the one copy.
+    _qu.add_infer_metadata(model)
+    return model
 _qu.save_and_reload_model_with_shape_infer = _save_and_reload_big
 _oq.save_and_reload_model_with_shape_infer = _save_and_reload_big
 
@@ -151,6 +147,7 @@ def quant(src, dst, ops):
     onnx.save(m, dst, save_as_external_data=False)  # under 2 GB once shrunk
     del m
     shutil.rmtree(work, ignore_errors=True)
+    gc.collect()
     log("quantized", dst, os.path.getsize(dst) // 1_000_000, "MB")
 
 quant(f"{TMP}/te/text_encoder.onnx", f"{TMP}/text_encoder_q.onnx", ["MatMul", "Gemm"])
