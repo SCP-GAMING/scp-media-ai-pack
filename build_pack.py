@@ -171,6 +171,8 @@ if STAGE in ("finish", "all"):
 
     quant(f"{TMP}/te/text_encoder.onnx", f"{TMP}/text_encoder_q.onnx", ["MatMul", "Gemm"])
     quant(f"{TMP}/unet/unet.onnx", f"{OUT}/unet.onnx", ["MatMul", "Gemm", "Conv"])
+    if os.environ.get("STOP_AFTER_UNET"):
+        sys.exit("stopping after the UNet shrink (diagnostic run)")
     shutil.copy(f"{TMP}/vae_enc/vae_encoder.onnx", f"{OUT}/vae_encoder.onnx")
     shutil.copy(f"{TMP}/vae_dec/vae_decoder.onnx", f"{OUT}/vae_decoder.onnx")
 

@@ -45,6 +45,21 @@ while True:
     removed += len(dead)
 left = sum(len(a.t.raw_data) + 4 * len(a.t.float_data) for nd in m.graph.node if nd.op_type == "Constant" for a in nd.attribute if a.type == onnx.AttributeProto.TENSOR)
 print("removed unused constants:", removed, "constants left MB:", left // 1_000_000, flush=True)
+if left > 100_000_000:
+    cons = {}
+    for nd in m.graph.node:
+        for i in nd.input: cons.setdefault(i, []).append(nd.op_type)
+    big_c = []
+    for nd in m.graph.node:
+        if nd.op_type != "Constant": continue
+        for a in nd.attribute:
+            if a.type == onnx.AttributeProto.TENSOR:
+                big_c.append((len(a.t.raw_data) + 4 * len(a.t.float_data), nd.output[0], list(a.t.dims), onnx.TensorProto.DataType.Name(a.t.data_type)))
+    big_c.sort(reverse=True)
+    from collections import Counter as C2
+    print("constant count:", len(big_c), "consumers of big ones:", C2(op for _, o, _, _ in big_c[:200] for op in cons.get(o, [])), flush=True)
+    for sz, o, dims, dt in big_c[:12]:
+        print("  const", sz // 1_000_000, "MB", dt, dims, o[:70], "->", cons.get(o, []), flush=True)
 for f in (dst, dst + ".data"):
     if os.path.exists(f): os.remove(f)
 try:
