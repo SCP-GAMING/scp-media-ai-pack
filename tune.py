@@ -57,30 +57,30 @@ blank = Image.new("RGB", (512, 512), (128, 128, 128)); full = Image.new("L", (51
 base = render(blank, full, "photo of a young man standing in a living room, wearing a plain black t-shirt and blue jeans, upper body, realistic",
               negative="blurry, deformed", guidance=2.0, strength=1.0, steps=8, seed=3)
 base.save("tune/base.png"); log("base person made")
-# The area to change: the shirt region, including where sleeves would go.
-mask = Image.new("L", (512, 512), 0); ImageDraw.Draw(mask).rectangle((110, 250, 400, 512), fill=255)
+# The area to change: the whole shirt (blue pixels below the chin), grown a little.
+arr = np.asarray(base).astype(np.int32)
+sel = (arr[:, :, 2] > arr[:, :, 0] + 40); sel[:200] = False
+from PIL import ImageFilter
+mask = Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.MinFilter(5))
 mask.save("tune/mask.png")
 
 SAFE_LONG = ", fully clothed, modest everyday clothing, family friendly, safe for work"
 SAFE_SHORT = ", fully clothed"
-NEG = "nude, naked, nsfw, nipples, cleavage, underwear, lingerie, bikini, see-through clothing, sexual, explicit, blurry, deformed"
-want = "a red knitted christmas sweater"
+NEG = ""
 cells = []
-for label, suffix, g, s in [
-    ("now: g1.0 s0.65 long", SAFE_LONG, 1.0, 0.65), ("g1.0 s0.85 short", SAFE_SHORT, 1.0, 0.85), ("g1.0 s1.0 short", SAFE_SHORT, 1.0, 1.0),
-    ("g1.6 s0.65 short", SAFE_SHORT, 1.6, 0.65), ("g1.6 s0.85 short", SAFE_SHORT, 1.6, 0.85), ("g1.6 s1.0 short", SAFE_SHORT, 1.6, 1.0),
-    ("g2.2 s0.65 short", SAFE_SHORT, 2.2, 0.65), ("g2.2 s0.85 short", SAFE_SHORT, 2.2, 0.85), ("g2.2 s1.0 short", SAFE_SHORT, 2.2, 1.0),
-]:
-    t0 = time.time()
-    r = render(base, mask, want + suffix, NEG, g, s, steps=6, seed=11)
-    cells.append((label, r)); log(label, round(time.time() - t0), "s")
+for want in ["a red knitted christmas sweater", "a green christmas elf costume", "a black leather jacket over a white shirt"]:
+    for tag, suffix in [("long", SAFE_LONG), ("short", SAFE_SHORT)]:
+        t0 = time.time()
+        r = render(base, mask, want + suffix, NEG, 1.0, 1.0, steps=6, seed=11)
+        label = want.replace("a ", "", 1)[:26] + " / " + tag
+        cells.append((label, r)); log(label, round(time.time() - t0), "s")
 
 W = 384
-grid = Image.new("RGB", (W * 4, (W + 24) * 3), (20, 20, 20))
+grid = Image.new("RGB", (W * 3, (W + 24) * 3), (20, 20, 20))
 d = ImageDraw.Draw(grid)
 grid.paste(base.resize((W, W)), (0, 0)); d.text((4, W + 4), "original", fill=(255, 255, 255))
 grid.paste(mask.convert("RGB").resize((W, W)), (0, W + 24)); d.text((4, 2 * W + 28), "area to change", fill=(255, 255, 255))
 for i, (label, im) in enumerate(cells):
-    x = (1 + i % 3) * W; y = (i // 3) * (W + 24)
+    x = (1 + i % 2) * W; y = (i // 2) * (W + 24)
     grid.paste(im.resize((W, W)), (x, y)); d.text((x + 4, y + W + 4), label, fill=(255, 255, 255))
 grid.save("tune/grid.png"); log("grid saved")
