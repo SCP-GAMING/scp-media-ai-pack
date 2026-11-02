@@ -42,7 +42,8 @@ jobs:
       - name: Build the pack
         run: |
           ( while true; do echo "MEM $(date +%H:%M:%S) $(free -m | awk '/Mem/{print "used="$3"MB avail="$7"MB"} /Swap/{print "swap="$3"MB"}' | tr '\n' ' ') DISK $(df -h / | awk 'NR==2{print $4}') free"; sleep 30; done ) &
-          python build_pack.py
+          python build_pack.py export
+          python build_pack.py finish
 
       - name: Publish
         env:

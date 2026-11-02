@@ -19,6 +19,21 @@ big = os.path.join(work, "model.onnx")
 quantize_dynamic(src, big, weight_type=QuantType.QUInt8, per_channel=False, op_types_to_quantize=ops,
                  use_external_data_format=True, extra_options={"DefaultTensorType": onnx.TensorProto.FLOAT})
 m = onnx.load(big, load_external_data=True)
-onnx.save(m, dst, save_as_external_data=False)  # under 2 GB once shrunk
+# What got shrunk (for the log).
+from collections import Counter
+ops_count = Counter(n.op_type for n in m.graph.node)
+by_type = Counter()
+for t in m.graph.initializer:
+    by_type[onnx.TensorProto.DataType.Name(t.data_type)] += len(t.raw_data) if t.raw_data else 0
+print("ops:", {k: v for k, v in ops_count.items() if k in ("Conv", "ConvInteger", "MatMul", "MatMulInteger", "Gemm", "DynamicQuantizeLinear")}, flush=True)
+print("weights MB by type:", {k: v // 1_000_000 for k, v in by_type.items()}, flush=True)
+for f in (dst, dst + ".data"):
+    if os.path.exists(f): os.remove(f)
+if sum(by_type.values()) < 1_900_000_000:
+    onnx.save(m, dst, save_as_external_data=False)
+else:
+    # Over protobuf's 2 GB limit: weights go in one side file next to the model (ONNX Runtime finds it).
+    onnx.save(m, dst, save_as_external_data=True, all_tensors_to_one_file=True,
+              location=os.path.basename(dst) + ".data", size_threshold=1024)
 shutil.rmtree(work, ignore_errors=True)
 print("quantized", dst, os.path.getsize(dst) // 1_000_000, "MB", flush=True)
