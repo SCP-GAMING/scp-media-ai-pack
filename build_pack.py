@@ -23,7 +23,8 @@ torch.set_grad_enabled(False)
 log = lambda *a: print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 from diffusers import StableDiffusionInpaintPipeline, LCMScheduler
-from transformers import AutoModelForImageClassification
+from transformers import AutoModelForImageClassification, CLIPTextModel
+from diffusers.models.attention_processor import AttnProcessor
 from huggingface_hub import hf_hub_download
 
 # ---------------------------------------------------------------- load + merge LCM-LoRA
@@ -31,7 +32,9 @@ REPOS = ["stable-diffusion-v1-5/stable-diffusion-inpainting", "runwayml/stable-d
 pipe = None
 for repo in REPOS:
     try:
-        pipe = StableDiffusionInpaintPipeline.from_pretrained(repo, torch_dtype=torch.float32, safety_checker=None, requires_safety_checker=False)
+        # "eager" attention: the ONNX converter can't handle the newer fused attention in the text encoder.
+        te_model = CLIPTextModel.from_pretrained(repo, subfolder="text_encoder", attn_implementation="eager")
+        pipe = StableDiffusionInpaintPipeline.from_pretrained(repo, text_encoder=te_model, torch_dtype=torch.float32, safety_checker=None, requires_safety_checker=False)
         BASE = repo
         log("loaded", repo)
         break
@@ -82,6 +85,9 @@ for steps in (4, 6, 8):
 log("lcm", json.dumps(lcm["4"]))
 
 # ---------------------------------------------------------------- export to ONNX
+# Plain attention for the export (same maths, a form the ONNX converter understands).
+pipe.unet.set_attn_processor(AttnProcessor())
+pipe.vae.set_attn_processor(AttnProcessor())
 class TextEnc(torch.nn.Module):
     def __init__(s, m): super().__init__(); s.m = m
     def forward(s, ids): return s.m(ids)[0]
@@ -163,7 +169,7 @@ t0 = time.time(); run_pipeline(f"{OUT}/unet.onnx").save(f"{OUT}/test_ort_8bit.pn
 shutil.rmtree(f"{TMP}/unet", ignore_errors=True)
 
 # ---------------------------------------------------------------- GRAIL.MECH: image safety checker
-clf = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection").eval()
+clf = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection", attn_implementation="eager").eval()
 labels = {str(k): v for k, v in clf.config.id2label.items()}
 class Clf(torch.nn.Module):
     def __init__(s, m): super().__init__(); s.m = m
