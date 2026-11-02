@@ -23,7 +23,7 @@ def enc(text):
     ids = np.array([tok(text, padding="max_length", max_length=77, truncation=True).input_ids], np.int64)
     return te.run(None, {"input_ids": ids})[0]
 
-def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, seed=7, init=None, fill=None):
+def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, seed=7, init=None, fill=None, fill_amt=1.0):
     """Exactly the app's Inpainter.run, in Python."""
     rows = lcm[str(steps)]
     start = min(len(rows) - 1, int(round(len(rows) * (1.0 - strength))))
@@ -33,7 +33,7 @@ def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, 
     m = (np.asarray(mask, np.float32) / 255.0 >= 0.5).astype(np.float32)[None, None]
     cond = im * (m < 0.5)
     if fill is not None:
-        cond = cond + (m >= 0.5) * (np.array(fill, np.float32).reshape(1, 3, 1, 1) / 127.5 - 1.0)
+        cond = cond + (m >= 0.5) * fill_amt * (np.array(fill, np.float32).reshape(1, 3, 1, 1) / 127.5 - 1.0)
     lat_m = ve.run(None, {"image": cond.astype(np.float32)})[0]
     m64 = m[:, :, ::8, ::8]
     rng = np.random.RandomState(seed)
@@ -79,10 +79,10 @@ cells = []
 for want, rgb in [("a red knitted christmas sweater", (190, 25, 35)), ("a green christmas elf costume", (35, 130, 55))]:
     p = want + SAFE_SHORT
     pre = recolor(base, mask, rgb)
-    for label, kw in [("A now: s1.0", dict(strength=1.0, steps=6)),
-                      ("B colour hint s1.0", dict(strength=1.0, steps=6, fill=rgb)),
-                      ("C pre-colour s0.9 8st", dict(strength=0.9, steps=8, init=pre, fill=rgb)),
-                      ("D pre-colour s0.75 8st", dict(strength=0.75, steps=8, init=pre, fill=rgb))]:
+    for label, kw in [("E hint 25% s1.0", dict(strength=1.0, steps=6, fill=rgb, fill_amt=0.25)),
+                      ("F hint 40% s1.0", dict(strength=1.0, steps=6, fill=rgb, fill_amt=0.4)),
+                      ("G pre-colour s0.9 8st", dict(strength=0.9, steps=8, init=pre)),
+                      ("H pre-col+hint25 s0.9", dict(strength=0.9, steps=8, init=pre, fill=rgb, fill_amt=0.25))]:
         t0 = time.time()
         r = render(base, mask, p, "", 1.0, seed=11, **kw)
         cells.append((want.split()[1] + " | " + label, r)); log(label, round(time.time() - t0), "s")
