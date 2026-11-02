@@ -87,32 +87,46 @@ def recolor(img, mask, rgb):
     return Image.fromarray((a * (1 - m) + out * m).astype(np.uint8))
 
 blank = Image.new("RGB", (512, 512), (128, 128, 128)); full = Image.new("L", (512, 512), 255)
+from scipy.ndimage import label as cc_label
+def biggest(sel):
+    lab, n = cc_label(sel)
+    if n == 0: return sel
+    sizes = np.bincount(lab.ravel()); sizes[0] = 0
+    return lab == sizes.argmax()
 people = []
-# 1) man in a blue t-shirt; area = blue pixels below the chin
-man = render(blank, full, "photo of a young man standing in a living room, wearing a plain blue t-shirt, upper body, realistic", "", 1.0, 1.0, 8, 3)
-arr = np.asarray(man).astype(np.int32); sel = arr[:, :, 2] > arr[:, :, 0] + 40; sel[:200] = False
-people.append(("shirt", man, Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.MinFilter(5))))
-# 2) woman in a black dress; area = dark pixels in the lower 60%
-wom = render(blank, full, "photo of a woman standing in a living room, wearing a plain black knee length dress with long sleeves, full body, realistic", "", 1.0, 1.0, 8, 5)
-arr = np.asarray(wom).astype(np.int32); L = arr.mean(2); sel = L < 60; sel[:int(512 * 0.38)] = False
-people.append(("dress", wom, Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(11)).filter(ImageFilter.MinFilter(5))))
-for n, im, mk in people: im.save(f"tune/{n}.png"); mk.save(f"tune/{n}_mask.png")
-log("test people made")
+wom = render(blank, full, "full body photo of a young woman standing in front of a white door, wearing a long sleeve emerald green knee length dress, realistic, natural light", "blurry, deformed", 2.0, 1.0, 8, 5)
+arr = np.asarray(wom).astype(np.int32)
+sel = biggest((arr[:, :, 1] > arr[:, :, 0] + 25) & (arr[:, :, 1] > arr[:, :, 2] + 10))
+mk = Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.MinFilter(3))
+mk_big = mk.filter(ImageFilter.MaxFilter(15))
+wom.save("tune/dress.png"); mk.save("tune/dress_mask.png")
+log("test person made, area", int(sel.sum()))
 
 SAFE = ", fully clothed, modest everyday clothing, family friendly, safe for work"
-want = "a red knitted christmas sweater with a white snowflake pattern"
-rgb = (190, 25, 35)
+NEG = "nude, naked, nsfw, nipples, cleavage, underwear, lingerie, bikini, see-through clothing, sexual, explicit, blurry, deformed, plain"
 rows_out = []
-for name, im, mk in people:
+for want in ["a santa claus costume", "a red christmas sweater and blue jeans"]:
     p = want + SAFE
-    pre = recolor(im, mk, rgb)
-    cells = [("original", im), ("area", mk.convert("RGB"))]
-    t0 = time.time(); cells.append(("A app now: pre-colour s0.9", render(im, mk, p, "", 1.0, 0.9, 8, 11, init=pre))); log(name, "A", round(time.time() - t0))
-    t0 = time.time(); r1 = render(im, mk, p, "", 1.0, 1.0, 6, 11)
-    cells.append(("B two-pass", render(r1, mk, p, "", 1.0, 0.9, 8, 11, init=recolor(r1, mk, rgb)))); log(name, "B", round(time.time() - t0))
-    t0 = time.time(); cells.append(("C hide old, s1.0", render(im, mk, p, "", 1.0, 1.0, 6, 11, blend=True))); log(name, "C", round(time.time() - t0))
-    t0 = time.time(); cells.append(("D hide old + pre-colour s0.95", render(im, mk, p, "", 1.0, 0.95, 8, 11, init=pre, blend=True))); log(name, "D", round(time.time() - t0))
-    t0 = time.time(); cells.append(("E hide old, g2.0", render(im, mk, p, "blurry, deformed, plain", 2.0, 1.0, 6, 11, blend=True))); log(name, "E", round(time.time() - t0))
+    cells = [("original", wom), ("area", mk.convert("RGB"))]
+    for label, kw in [
+        ("A normal g2", dict(img=wom, mask=mk, negative=NEG, blend=False)),
+        ("B normal g2 + 'not green'", dict(img=wom, mask=mk, negative=NEG + ", green, green dress", blend=False)),
+        ("C normal g2 + not green, bigger area", dict(img=wom, mask=mk_big, negative=NEG + ", green, green dress", blend=False)),
+        ("D hide old g2 (app now)", dict(img=wom, mask=mk, negative=NEG, blend=True)),
+        ("E grey old + not green", dict(img=wom, mask=mk, negative=NEG + ", green, green dress", blend=False, grey=True)),
+    ]:
+        t0 = time.time()
+        img = kw.pop("img"); mask = kw.pop("mask"); grey = kw.pop("grey", False)
+        if grey:
+            # show the AI the body's shape and shading inside the area, but in grey (no old colour)
+            g = np.asarray(img.convert("L").convert("RGB"))
+            m3 = (np.asarray(mask)[:, :, None] / 255.0)
+            src = Image.fromarray((np.asarray(img) * (1 - m3) + g * m3).astype(np.uint8))
+            r = render(src, mask, p, guidance=2.0, strength=0.92, steps=8, seed=11, **kw)
+            r = Image.fromarray((np.asarray(img) * (1 - m3) + np.asarray(r) * m3).astype(np.uint8))
+        else:
+            r = render(img, mask, p, guidance=2.0, strength=1.0, steps=6, seed=11, **kw)
+        cells.append((label, r)); log(want[:12], label, round(time.time() - t0))
     rows_out.append(cells)
 
 W = 300
