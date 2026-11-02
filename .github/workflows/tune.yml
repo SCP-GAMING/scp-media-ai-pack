@@ -1,0 +1,30 @@
+name: Tune outfit settings
+
+# Renders a grid of test edits at different settings (uses the published pack). Free on public repos.
+on:
+  workflow_dispatch:
+    inputs:
+      pack:
+        description: "Pack release to test"
+        default: "pack-2"
+
+permissions:
+  contents: write
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --no-cache-dir onnxruntime==1.19.2 numpy==1.26.4 pillow transformers==4.44.2
+      - run: python tune.py ${{ inputs.pack }}
+      - name: Publish the grid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete tune --cleanup-tag --yes || true
+          gh release create tune tune/*.png --prerelease --title "Settings test" --notes "Outfit editor settings comparison."
