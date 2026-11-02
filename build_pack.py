@@ -122,32 +122,10 @@ import gc; gc.collect()
 import onnxruntime as ort
 from onnxruntime.quantization import quantize_dynamic, QuantType
 
-import onnx, tempfile
-from pathlib import Path
-import onnxruntime.quantization.quant_utils as _qu
-import onnxruntime.quantization.onnx_quantizer as _oq
-
-def _save_and_reload_big(model):
-    # The quantizer re-saves and reloads the whole model here (fails over 2 GB, and needs several
-    # copies in memory). Shapes aren't needed for weight-only shrinking, so keep the one copy.
-    _qu.add_infer_metadata(model)
-    return model
-_qu.save_and_reload_model_with_shape_infer = _save_and_reload_big
-_oq.save_and_reload_model_with_shape_infer = _save_and_reload_big
-
+import subprocess
 def quant(src, dst, ops):
-    # Work with the weights in side files (the full UNet is over protobuf's 2 GB limit),
-    # then join them back into one file, which fits once shrunk to 8-bit.
-    work = os.path.join(TMP, "q_" + os.path.basename(dst).replace(".onnx", ""))
-    os.makedirs(work, exist_ok=True)
-    big = os.path.join(work, "model.onnx")
-    quantize_dynamic(src, big, weight_type=QuantType.QUInt8, per_channel=False, op_types_to_quantize=ops,
-                     use_external_data_format=True, extra_options={"DefaultTensorType": onnx.TensorProto.FLOAT})
-    m = onnx.load(big, load_external_data=True)
-    onnx.save(m, dst, save_as_external_data=False)  # under 2 GB once shrunk
-    del m
-    shutil.rmtree(work, ignore_errors=True)
-    gc.collect()
+    # In a fresh process, so it has the memory to itself.
+    subprocess.run([sys.executable, "quant_one.py", src, dst, ",".join(ops)], check=True)
     log("quantized", dst, os.path.getsize(dst) // 1_000_000, "MB")
 
 quant(f"{TMP}/te/text_encoder.onnx", f"{TMP}/text_encoder_q.onnx", ["MatMul", "Gemm"])
