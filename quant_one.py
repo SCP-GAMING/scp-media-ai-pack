@@ -24,16 +24,24 @@ from collections import Counter
 ops_count = Counter(n.op_type for n in m.graph.node)
 by_type = Counter()
 for t in m.graph.initializer:
-    by_type[onnx.TensorProto.DataType.Name(t.data_type)] += len(t.raw_data) if t.raw_data else 0
+    n = len(t.raw_data) + 4 * (len(t.float_data) + len(t.int32_data)) + 8 * len(t.int64_data)
+    by_type[onnx.TensorProto.DataType.Name(t.data_type)] += n
+const_bytes = sum(len(a.t.raw_data) + 4 * len(a.t.float_data) for nd in m.graph.node if nd.op_type == "Constant" for a in nd.attribute if a.type == onnx.AttributeProto.TENSOR)
+used = {i for nd in m.graph.node for i in nd.input}
+unused = [t for t in m.graph.initializer if t.name not in used]
 print("ops:", {k: v for k, v in ops_count.items() if k in ("Conv", "ConvInteger", "MatMul", "MatMulInteger", "Gemm", "DynamicQuantizeLinear")}, flush=True)
-print("weights MB by type:", {k: v // 1_000_000 for k, v in by_type.items()}, flush=True)
+print("weights MB by type:", {k: v // 1_000_000 for k, v in by_type.items()}, "constants MB:", const_bytes // 1_000_000, "unused initializers:", len(unused), flush=True)
+for t in unused:
+    m.graph.initializer.remove(t)
 for f in (dst, dst + ".data"):
     if os.path.exists(f): os.remove(f)
-if sum(by_type.values()) < 1_900_000_000:
+try:
     onnx.save(m, dst, save_as_external_data=False)
-else:
-    # Over protobuf's 2 GB limit: weights go in one side file next to the model (ONNX Runtime finds it).
+except Exception as e:
+    print("one file too big, using a side file:", type(e).__name__, flush=True)
+    if os.path.exists(dst): os.remove(dst)
+    # Weights go in one side file next to the model (ONNX Runtime finds it by name).
     onnx.save(m, dst, save_as_external_data=True, all_tensors_to_one_file=True,
-              location=os.path.basename(dst) + ".data", size_threshold=1024)
+              location=os.path.basename(dst) + ".data", size_threshold=1024, convert_attribute=True)
 shutil.rmtree(work, ignore_errors=True)
-print("quantized", dst, os.path.getsize(dst) // 1_000_000, "MB", flush=True)
+print("quantized", dst, (os.path.getsize(dst) + (os.path.getsize(dst + ".data") if os.path.exists(dst + ".data") else 0)) // 1_000_000, "MB", flush=True)
