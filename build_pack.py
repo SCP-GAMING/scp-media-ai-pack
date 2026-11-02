@@ -112,10 +112,15 @@ if STAGE in ("export", "all"):
             k = attn.to_k(encoder_hidden_states)
             v = attn.to_v(encoder_hidden_states)
             q = attn.head_to_batch_dim(q); k = attn.head_to_batch_dim(k); v = attn.head_to_batch_dim(v)
-            scores = torch.bmm(q, k.transpose(-1, -2)) * attn.scale
-            if attention_mask is not None:
-                scores = scores + attention_mask
-            hidden_states = torch.bmm(scores.softmax(dim=-1), v)
+            # In slices of 1024 rows, so the phone never needs the whole (8 x 4096 x 4096) table at once (~1 GB).
+            kt = k.transpose(-1, -2)
+            outs = []
+            for i in range(0, q.shape[1], 1024):
+                sc = torch.bmm(q[:, i:i + 1024], kt) * attn.scale
+                if attention_mask is not None:
+                    sc = sc + attention_mask[:, i:i + 1024]
+                outs.append(torch.bmm(sc.softmax(dim=-1), v))
+            hidden_states = outs[0] if len(outs) == 1 else torch.cat(outs, dim=1)
             hidden_states = attn.batch_to_head_dim(hidden_states)
             hidden_states = attn.to_out[1](attn.to_out[0](hidden_states))
             if nd == 4:
@@ -228,7 +233,7 @@ if STAGE in ("finish", "all"):
     shutil.copy(f"{TMP}/text_encoder_q.onnx" if cos > 0.995 else f"{TMP}/te/text_encoder.onnx", f"{OUT}/text_encoder.onnx")
 
     # ---------------------------------------------------------------- the app's pipeline, in Python (the Kotlin code mirrors this)
-    def run_pipeline(unet_path, seed=7, steps=4):
+    def run_pipeline(unet_path, seed=7, steps=4, strength=1.0):
         te, ve, vd, un = sess(f"{OUT}/text_encoder.onnx"), sess(f"{OUT}/vae_encoder.onnx"), sess(f"{OUT}/vae_decoder.onnx"), sess(unet_path)
         hidden = te.run(None, {"input_ids": ids})[0]
         img = np.asarray(test_img, np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0
@@ -237,8 +242,16 @@ if STAGE in ("finish", "all"):
         lat_m = ve.run(None, {"image": masked.astype(np.float32)})[0]
         m64 = m[:, :, ::8, ::8]  # nearest, exactly like torch interpolate (pixel 8*i)
         rng = np.random.RandomState(seed)
-        x = rng.randn(1, 4, 64, 64).astype(np.float32)
         rows = lcm[str(steps)]
+        # Keep-shape edits start part-way, from the original picture with some noise added (like the app).
+        start = min(len(rows) - 1, int(round(len(rows) * (1.0 - strength))))
+        rows = rows[start:]
+        noise = rng.randn(1, 4, 64, 64).astype(np.float32)
+        if start > 0:
+            z0 = ve.run(None, {"image": img.astype(np.float32)})[0]
+            x = (np.sqrt(rows[0]["a"]) * z0 + np.sqrt(1 - rows[0]["a"]) * noise).astype(np.float32)
+        else:
+            x = noise
         for i, r in enumerate(rows):
             inp = np.concatenate([x, m64, lat_m], 1).astype(np.float32)
             eps = un.run(None, {"sample": inp, "timestep": np.array([r["t"]], np.float32), "hidden": hidden})[0]
@@ -251,6 +264,7 @@ if STAGE in ("finish", "all"):
 
     t0 = time.time(); run_pipeline(f"{TMP}/unet/unet.onnx").save(f"{OUT}/test_ort_full.png"); log("onnx full render", round(time.time() - t0), "s")
     t0 = time.time(); run_pipeline(f"{OUT}/unet.onnx").save(f"{OUT}/test_ort_8bit.png"); log("onnx 8-bit render", round(time.time() - t0), "s")
+    t0 = time.time(); run_pipeline(f"{OUT}/unet.onnx", steps=8, strength=0.6).save(f"{OUT}/test_ort_8bit_keepshape.png"); log("onnx 8-bit keep-shape render", round(time.time() - t0), "s")
     shutil.rmtree(f"{TMP}/unet", ignore_errors=True)
 
     # ---------------------------------------------------------------- GRAIL.MECH: image safety checker (shrink + check)
