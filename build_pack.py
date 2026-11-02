@@ -131,7 +131,7 @@ def _save_and_reload_big(model):
     # The quantizer re-saves the model in one piece, which fails over 2 GB. Save with side files instead.
     with tempfile.TemporaryDirectory(dir=TMP) as d:
         p = os.path.join(d, "model.onnx")
-        onnx.save_model(model, p, save_as_external_data=True, all_tensors_to_one_file=True, location="model.onnx.data")
+        onnx.save_model(model, p, save_as_external_data=True, all_tensors_to_one_file=True, location="model.onnx.data", size_threshold=0, convert_attribute=True)
         onnx.shape_inference.infer_shapes_path(p, p)
         m = onnx.load(p, load_external_data=True)
         _qu.add_infer_metadata(m)
@@ -148,7 +148,7 @@ def quant(src, dst, ops):
     quantize_dynamic(src, big, weight_type=QuantType.QUInt8, per_channel=False, op_types_to_quantize=ops,
                      use_external_data_format=True)
     m = onnx.load(big, load_external_data=True)
-    onnx.save(m, dst, save_as_external_data=False)
+    onnx.save(m, dst, save_as_external_data=False)  # under 2 GB once shrunk
     del m
     shutil.rmtree(work, ignore_errors=True)
     log("quantized", dst, os.path.getsize(dst) // 1_000_000, "MB")
