@@ -23,76 +23,101 @@ def enc(text):
     ids = np.array([tok(text, padding="max_length", max_length=77, truncation=True).input_ids], np.int64)
     return te.run(None, {"input_ids": ids})[0]
 
-def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, seed=7, init=None, fill=None, fill_amt=1.0):
-    """Exactly the app's Inpainter.run, in Python."""
+def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, seed=7, init=None, fill=None, fill_amt=1.0, blend=False):
+    """The app's Inpainter.run in Python, plus experimental options."""
     rows = lcm[str(steps)]
     start = min(len(rows) - 1, int(round(len(rows) * (1.0 - strength))))
     rows = rows[start:]
     h = enc(prompt); hn = enc(negative) if guidance > 1.01 else None
     im = np.asarray(img, np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0
     m = (np.asarray(mask, np.float32) / 255.0 >= 0.5).astype(np.float32)[None, None]
-    cond = im * (m < 0.5)
-    if fill is not None:
-        cond = cond + (m >= 0.5) * fill_amt * (np.array(fill, np.float32).reshape(1, 3, 1, 1) / 127.5 - 1.0)
+    if blend:
+        cond = np.zeros_like(im); m_in = np.ones((1, 1, 64, 64), np.float32)
+    else:
+        cond = im * (m < 0.5)
+        if fill is not None:
+            cond = cond + (m >= 0.5) * fill_amt * (np.array(fill, np.float32).reshape(1, 3, 1, 1) / 127.5 - 1.0)
+        m_in = m[:, :, ::8, ::8]
     lat_m = ve.run(None, {"image": cond.astype(np.float32)})[0]
-    m64 = m[:, :, ::8, ::8]
+    # latent-size mask, grown by one cell so edges blend
+    m64 = m[:, :, ::8, ::8].copy()
+    from scipy.ndimage import maximum_filter
+    m64 = maximum_filter(m64, size=(1, 1, 3, 3))
     rng = np.random.RandomState(seed)
     noise = rng.randn(1, 4, 64, 64).astype(np.float32)
+    z_orig = ve.run(None, {"image": im.astype(np.float32)})[0]
+    z_init = z_orig if init is None else ve.run(None, {"image": (np.asarray(init, np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0).astype(np.float32)})[0]
     if start > 0:
-        z0 = ve.run(None, {"image": (im if init is None else np.asarray(init, np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0).astype(np.float32)})[0]
-        x = (np.sqrt(rows[0]["a"]) * z0 + np.sqrt(1 - rows[0]["a"]) * noise).astype(np.float32)
+        x = (np.sqrt(rows[0]["a"]) * z_init + np.sqrt(1 - rows[0]["a"]) * noise).astype(np.float32)
     else:
         x = noise
+    if blend:
+        x = m64 * x + (1 - m64) * (np.sqrt(rows[0]["a"]) * z_orig + np.sqrt(1 - rows[0]["a"]) * noise)
     for i, r in enumerate(rows):
         def eps(hh):
-            return un.run(None, {"sample": np.concatenate([x, m64, lat_m], 1).astype(np.float32), "timestep": np.array([r["t"]], np.float32), "hidden": hh})[0]
+            return un.run(None, {"sample": np.concatenate([x, m_in, lat_m], 1).astype(np.float32), "timestep": np.array([r["t"]], np.float32), "hidden": hh})[0]
         e = eps(h)
         if hn is not None:
             en = eps(hn); e = en + guidance * (e - en)
         x0 = (x - np.sqrt(1 - r["a"]) * e) / np.sqrt(r["a"])
         den = r["c_out"] * x0 + r["c_skip"] * x
-        x = (np.sqrt(r["a_prev"]) * den + np.sqrt(1 - r["a_prev"]) * rng.randn(*x.shape).astype(np.float32)) if i + 1 < len(rows) else den
+        last = i + 1 == len(rows)
+        if last:
+            x = den
+            if blend: x = m64 * x + (1 - m64) * z_orig
+        else:
+            n2 = rng.randn(*x.shape).astype(np.float32)
+            x = np.sqrt(r["a_prev"]) * den + np.sqrt(1 - r["a_prev"]) * n2
+            if blend:
+                x = m64 * x + (1 - m64) * (np.sqrt(r["a_prev"]) * z_orig + np.sqrt(1 - r["a_prev"]) * n2)
     out = vd.run(None, {"latent": x.astype(np.float32)})[0]
-    return Image.fromarray(np.clip((out[0].transpose(1, 2, 0) + 1) * 127.5, 0, 255).astype(np.uint8))
+    gen = np.clip((out[0].transpose(1, 2, 0) + 1) * 127.5, 0, 255)
+    # put back only inside the area, like the app does
+    mm = (np.asarray(mask, np.float32) / 255.0)[:, :, None]
+    orig = np.asarray(img, np.float32)
+    return Image.fromarray((orig * (1 - mm) + gen * mm).astype(np.uint8))
 
-# A made-up test person to edit (generated with the same model, whole picture painted).
-blank = Image.new("RGB", (512, 512), (128, 128, 128)); full = Image.new("L", (512, 512), 255)
-base = render(blank, full, "photo of a young man standing in a living room, wearing a plain black t-shirt and blue jeans, upper body, realistic",
-              negative="blurry, deformed", guidance=2.0, strength=1.0, steps=8, seed=3)
-base.save("tune/base.png"); log("base person made")
-# The area to change: the whole shirt (blue pixels below the chin), grown a little.
-arr = np.asarray(base).astype(np.int32)
-sel = (arr[:, :, 2] > arr[:, :, 0] + 40); sel[:200] = False
 from PIL import ImageFilter
-mask = Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.MinFilter(5))
-mask.save("tune/mask.png")
-
-SAFE_SHORT = ", fully clothed"
 def recolor(img, mask, rgb):
-    """Same idea as the app's instant recolour: keep the shading, swap the colour."""
     a = np.asarray(img, np.float32); m = np.asarray(mask, np.float32)[:, :, None] / 255.0
     L = a @ np.array([0.299, 0.587, 0.114], np.float32)
-    rel = L / max(1.0, float((L * m[:, :, 0]).sum() / max(1.0, m.sum())))
-    out = np.clip(np.array(rgb, np.float32)[None, None] * rel[:, :, None], 0, 255)
+    mean = float((L * m[:, :, 0]).sum() / max(1.0, m.sum()))
+    tl = float(np.dot(rgb, [0.299, 0.587, 0.114]))
+    out = np.clip(np.array(rgb, np.float32)[None, None] + (L - mean)[:, :, None], 0, 255)
     return Image.fromarray((a * (1 - m) + out * m).astype(np.uint8))
-cells = []
-for want, rgb in [("a red knitted christmas sweater", (190, 25, 35)), ("a green christmas elf costume", (35, 130, 55))]:
-    p = want + SAFE_SHORT
-    pre = recolor(base, mask, rgb)
-    for label, kw in [("E hint 25% s1.0", dict(strength=1.0, steps=6, fill=rgb, fill_amt=0.25)),
-                      ("F hint 40% s1.0", dict(strength=1.0, steps=6, fill=rgb, fill_amt=0.4)),
-                      ("G pre-colour s0.9 8st", dict(strength=0.9, steps=8, init=pre)),
-                      ("H pre-col+hint25 s0.9", dict(strength=0.9, steps=8, init=pre, fill=rgb, fill_amt=0.25))]:
-        t0 = time.time()
-        r = render(base, mask, p, "", 1.0, seed=11, **kw)
-        cells.append((want.split()[1] + " | " + label, r)); log(label, round(time.time() - t0), "s")
 
-W = 320
-grid = Image.new("RGB", (W * 5, (W + 24) * 2), (20, 20, 20))
-d = ImageDraw.Draw(grid)
-grid.paste(base.resize((W, W)), (0, 0)); d.text((4, W + 4), "original", fill=(255, 255, 255))
-grid.paste(mask.convert("RGB").resize((W, W)), (0, W + 24)); d.text((4, 2 * W + 28), "area to change", fill=(255, 255, 255))
-for i, (label, im) in enumerate(cells):
-    x = (1 + i % 4) * W; y = (i // 4) * (W + 24)
-    grid.paste(im.resize((W, W)), (x, y)); d.text((x + 4, y + W + 4), label, fill=(255, 255, 255))
+blank = Image.new("RGB", (512, 512), (128, 128, 128)); full = Image.new("L", (512, 512), 255)
+people = []
+# 1) man in a blue t-shirt; area = blue pixels below the chin
+man = render(blank, full, "photo of a young man standing in a living room, wearing a plain blue t-shirt, upper body, realistic", "", 1.0, 1.0, 8, 3)
+arr = np.asarray(man).astype(np.int32); sel = arr[:, :, 2] > arr[:, :, 0] + 40; sel[:200] = False
+people.append(("shirt", man, Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.MinFilter(5))))
+# 2) woman in a black dress; area = dark pixels in the lower 60%
+wom = render(blank, full, "photo of a woman standing in a living room, wearing a plain black knee length dress with long sleeves, full body, realistic", "", 1.0, 1.0, 8, 5)
+arr = np.asarray(wom).astype(np.int32); L = arr.mean(2); sel = L < 60; sel[:int(512 * 0.38)] = False
+people.append(("dress", wom, Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(11)).filter(ImageFilter.MinFilter(5))))
+for n, im, mk in people: im.save(f"tune/{n}.png"); mk.save(f"tune/{n}_mask.png")
+log("test people made")
+
+SAFE = ", fully clothed, modest everyday clothing, family friendly, safe for work"
+want = "a red knitted christmas sweater with a white snowflake pattern"
+rgb = (190, 25, 35)
+rows_out = []
+for name, im, mk in people:
+    p = want + SAFE
+    pre = recolor(im, mk, rgb)
+    cells = [("original", im), ("area", mk.convert("RGB"))]
+    t0 = time.time(); cells.append(("A app now: pre-colour s0.9", render(im, mk, p, "", 1.0, 0.9, 8, 11, init=pre))); log(name, "A", round(time.time() - t0))
+    t0 = time.time(); r1 = render(im, mk, p, "", 1.0, 1.0, 6, 11)
+    cells.append(("B two-pass", render(r1, mk, p, "", 1.0, 0.9, 8, 11, init=recolor(r1, mk, rgb)))); log(name, "B", round(time.time() - t0))
+    t0 = time.time(); cells.append(("C hide old, s1.0", render(im, mk, p, "", 1.0, 1.0, 6, 11, blend=True))); log(name, "C", round(time.time() - t0))
+    t0 = time.time(); cells.append(("D hide old + pre-colour s0.95", render(im, mk, p, "", 1.0, 0.95, 8, 11, init=pre, blend=True))); log(name, "D", round(time.time() - t0))
+    t0 = time.time(); cells.append(("E hide old, g2.0", render(im, mk, p, "blurry, deformed, plain", 2.0, 1.0, 6, 11, blend=True))); log(name, "E", round(time.time() - t0))
+    rows_out.append(cells)
+
+W = 300
+grid = Image.new("RGB", (W * 7, (W + 22) * 2), (20, 20, 20)); d = ImageDraw.Draw(grid)
+for r, cells in enumerate(rows_out):
+    for i, (label, im) in enumerate(cells):
+        grid.paste(im.resize((W, W)), (i * W, r * (W + 22))); d.text((i * W + 4, r * (W + 22) + W + 4), label, fill=(255, 255, 255))
 grid.save("tune/grid.png"); log("grid saved")

@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install --no-cache-dir onnxruntime==1.19.2 numpy==1.26.4 pillow transformers==4.44.2
+      - run: pip install --no-cache-dir onnxruntime==1.19.2 numpy==1.26.4 scipy pillow transformers==4.44.2
       - run: python tune.py ${{ inputs.pack }}
       - name: Publish the grid
         env:
