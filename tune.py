@@ -23,7 +23,7 @@ def enc(text):
     ids = np.array([tok(text, padding="max_length", max_length=77, truncation=True).input_ids], np.int64)
     return te.run(None, {"input_ids": ids})[0]
 
-def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, seed=7):
+def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, seed=7, init=None, fill=None):
     """Exactly the app's Inpainter.run, in Python."""
     rows = lcm[str(steps)]
     start = min(len(rows) - 1, int(round(len(rows) * (1.0 - strength))))
@@ -31,12 +31,15 @@ def render(img, mask, prompt, negative="", guidance=1.0, strength=1.0, steps=6, 
     h = enc(prompt); hn = enc(negative) if guidance > 1.01 else None
     im = np.asarray(img, np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0
     m = (np.asarray(mask, np.float32) / 255.0 >= 0.5).astype(np.float32)[None, None]
-    lat_m = ve.run(None, {"image": (im * (m < 0.5)).astype(np.float32)})[0]
+    cond = im * (m < 0.5)
+    if fill is not None:
+        cond = cond + (m >= 0.5) * (np.array(fill, np.float32).reshape(1, 3, 1, 1) / 127.5 - 1.0)
+    lat_m = ve.run(None, {"image": cond.astype(np.float32)})[0]
     m64 = m[:, :, ::8, ::8]
     rng = np.random.RandomState(seed)
     noise = rng.randn(1, 4, 64, 64).astype(np.float32)
     if start > 0:
-        z0 = ve.run(None, {"image": im.astype(np.float32)})[0]
+        z0 = ve.run(None, {"image": (im if init is None else np.asarray(init, np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0).astype(np.float32)})[0]
         x = (np.sqrt(rows[0]["a"]) * z0 + np.sqrt(1 - rows[0]["a"]) * noise).astype(np.float32)
     else:
         x = noise
@@ -64,23 +67,32 @@ from PIL import ImageFilter
 mask = Image.fromarray((sel * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.MinFilter(5))
 mask.save("tune/mask.png")
 
-SAFE_LONG = ", fully clothed, modest everyday clothing, family friendly, safe for work"
 SAFE_SHORT = ", fully clothed"
-NEG = ""
+def recolor(img, mask, rgb):
+    """Same idea as the app's instant recolour: keep the shading, swap the colour."""
+    a = np.asarray(img, np.float32); m = np.asarray(mask, np.float32)[:, :, None] / 255.0
+    L = a @ np.array([0.299, 0.587, 0.114], np.float32)
+    rel = L / max(1.0, float((L * m[:, :, 0]).sum() / max(1.0, m.sum())))
+    out = np.clip(np.array(rgb, np.float32)[None, None] * rel[:, :, None], 0, 255)
+    return Image.fromarray((a * (1 - m) + out * m).astype(np.uint8))
 cells = []
-for want in ["a red knitted christmas sweater", "a green christmas elf costume", "a black leather jacket over a white shirt"]:
-    for tag, suffix in [("long", SAFE_LONG), ("short", SAFE_SHORT)]:
+for want, rgb in [("a red knitted christmas sweater", (190, 25, 35)), ("a green christmas elf costume", (35, 130, 55))]:
+    p = want + SAFE_SHORT
+    pre = recolor(base, mask, rgb)
+    for label, kw in [("A now: s1.0", dict(strength=1.0, steps=6)),
+                      ("B colour hint s1.0", dict(strength=1.0, steps=6, fill=rgb)),
+                      ("C pre-colour s0.9 8st", dict(strength=0.9, steps=8, init=pre, fill=rgb)),
+                      ("D pre-colour s0.75 8st", dict(strength=0.75, steps=8, init=pre, fill=rgb))]:
         t0 = time.time()
-        r = render(base, mask, want + suffix, NEG, 1.0, 1.0, steps=6, seed=11)
-        label = want.replace("a ", "", 1)[:26] + " / " + tag
-        cells.append((label, r)); log(label, round(time.time() - t0), "s")
+        r = render(base, mask, p, "", 1.0, seed=11, **kw)
+        cells.append((want.split()[1] + " | " + label, r)); log(label, round(time.time() - t0), "s")
 
-W = 384
-grid = Image.new("RGB", (W * 3, (W + 24) * 3), (20, 20, 20))
+W = 320
+grid = Image.new("RGB", (W * 5, (W + 24) * 2), (20, 20, 20))
 d = ImageDraw.Draw(grid)
 grid.paste(base.resize((W, W)), (0, 0)); d.text((4, W + 4), "original", fill=(255, 255, 255))
 grid.paste(mask.convert("RGB").resize((W, W)), (0, W + 24)); d.text((4, 2 * W + 28), "area to change", fill=(255, 255, 255))
 for i, (label, im) in enumerate(cells):
-    x = (1 + i % 2) * W; y = (i // 2) * (W + 24)
+    x = (1 + i % 4) * W; y = (i // 4) * (W + 24)
     grid.paste(im.resize((W, W)), (x, y)); d.text((x + 4, y + W + 4), label, fill=(255, 255, 255))
 grid.save("tune/grid.png"); log("grid saved")
