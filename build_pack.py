@@ -89,9 +89,50 @@ if STAGE in ("export", "all"):
     log("lcm", json.dumps(lcm["4"]))
 
     # ---------------------------------------------------------------- export to ONNX
-    # Plain attention for the export (same maths, a form the ONNX converter understands).
-    pipe.unet.set_attn_processor(AttnProcessor())
-    pipe.vae.set_attn_processor(AttnProcessor())
+    # Plain attention for the export: same maths, written with matmul + softmax. (The usual version starts
+    # from a blank tensor that the converter bakes in as huge tables of zeros: 530 MB each.)
+    class PlainAttn:
+        def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, temb=None, *args, **kwargs):
+            residual = hidden_states
+            if attn.spatial_norm is not None:
+                hidden_states = attn.spatial_norm(hidden_states, temb)
+            nd = hidden_states.ndim
+            if nd == 4:
+                b, c, h, w = hidden_states.shape
+                hidden_states = hidden_states.view(b, c, h * w).transpose(1, 2)
+            bs, seq, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+            attention_mask = attn.prepare_attention_mask(attention_mask, seq, bs)
+            if attn.group_norm is not None:
+                hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+            q = attn.to_q(hidden_states)
+            if encoder_hidden_states is None:
+                encoder_hidden_states = hidden_states
+            elif attn.norm_cross:
+                encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+            k = attn.to_k(encoder_hidden_states)
+            v = attn.to_v(encoder_hidden_states)
+            q = attn.head_to_batch_dim(q); k = attn.head_to_batch_dim(k); v = attn.head_to_batch_dim(v)
+            scores = torch.bmm(q, k.transpose(-1, -2)) * attn.scale
+            if attention_mask is not None:
+                scores = scores + attention_mask
+            hidden_states = torch.bmm(scores.softmax(dim=-1), v)
+            hidden_states = attn.batch_to_head_dim(hidden_states)
+            hidden_states = attn.to_out[1](attn.to_out[0](hidden_states))
+            if nd == 4:
+                hidden_states = hidden_states.transpose(-1, -2).reshape(b, c, h, w)
+            if attn.residual_connection:
+                hidden_states = hidden_states + residual
+            return hidden_states / attn.rescale_output_factor
+    pipe.unet.set_attn_processor(PlainAttn())
+    pipe.vae.set_attn_processor(PlainAttn())
+    # Same answer as before? (checks the plain version against the one that made the reference picture)
+    with torch.no_grad():
+        _s = torch.randn(1, 9, 64, 64, generator=torch.Generator().manual_seed(1)); _h = torch.randn(1, 77, 768, generator=torch.Generator().manual_seed(2))
+        _a = pipe.unet(_s, torch.tensor([500.0]), encoder_hidden_states=_h).sample
+        pipe.unet.set_attn_processor(AttnProcessor())
+        _b = pipe.unet(_s, torch.tensor([500.0]), encoder_hidden_states=_h).sample
+        pipe.unet.set_attn_processor(PlainAttn())
+        log("plain attention max difference", float((_a - _b).abs().max()))
     class TextEnc(torch.nn.Module):
         def __init__(s, m): super().__init__(); s.m = m
         def forward(s, ids): return s.m(ids)[0]
