@@ -122,7 +122,23 @@ import gc; gc.collect()
 import onnxruntime as ort
 from onnxruntime.quantization import quantize_dynamic, QuantType
 
-import onnx
+import onnx, tempfile
+from pathlib import Path
+import onnxruntime.quantization.quant_utils as _qu
+import onnxruntime.quantization.onnx_quantizer as _oq
+
+def _save_and_reload_big(model):
+    # The quantizer re-saves the model in one piece, which fails over 2 GB. Save with side files instead.
+    with tempfile.TemporaryDirectory(dir=TMP) as d:
+        p = os.path.join(d, "model.onnx")
+        onnx.save_model(model, p, save_as_external_data=True, all_tensors_to_one_file=True, location="model.onnx.data")
+        onnx.shape_inference.infer_shapes_path(p, p)
+        m = onnx.load(p, load_external_data=True)
+        _qu.add_infer_metadata(m)
+        return m
+_qu.save_and_reload_model_with_shape_infer = _save_and_reload_big
+_oq.save_and_reload_model_with_shape_infer = _save_and_reload_big
+
 def quant(src, dst, ops):
     # Work with the weights in side files (the full UNet is over protobuf's 2 GB limit),
     # then join them back into one file, which fits once shrunk to 8-bit.
