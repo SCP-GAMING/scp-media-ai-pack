@@ -1,0 +1,35 @@
+name: Build People pack
+
+# Face finder + face matcher + Whisper speech-to-text for the SCP Media editor. Free on public repos.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag"
+        default: "people-1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-cache-dir transformers==4.44.2 onnx==1.16.2 onnxruntime==1.19.2 numpy==1.26.4 \
+            opencv-python-headless==4.10.0.84 soundfile
+      - run: python build_people.py
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${{ inputs.tag }}" --cleanup-tag --yes || true
+          gh release create "${{ inputs.tag }}" people/* --title "People pack ${{ inputs.tag }}" \
+            --notes "Face finder (YuNet, MIT), face matcher (SFace, Apache-2.0) and speech-to-text (Whisper base, MIT) for SCP Media."
