@@ -214,7 +214,12 @@ def speech():
     jfk = fetch("https://github.com/openai/whisper/raw/main/tests/jfk.flac", f"{TMP}/jfk.flac")
     a, sr = sf.read(jfk, dtype="float32")
     if a.ndim > 1: a = a.mean(1)
-    assert sr == 16000
+    if sr != 16000:
+        # The app's resampling: straight-line in-between values.
+        n_out = int(len(a) * 16000 / sr)
+        pos = np.arange(n_out) * (sr / 16000.0)
+        a = np.interp(pos, np.arange(len(a)), a).astype(np.float32)
+        log("resampled", sr, "-> 16000")
     audio = np.zeros(480000, np.float32); audio[:len(a)] = a
 
     front = Frontend().eval(); dec = Decoder().eval()
